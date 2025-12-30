@@ -1,5 +1,6 @@
 # Cortivus Docling Parser - GPU-enabled version
 # Uses NVIDIA CUDA base image for GPU acceleration
+# docker-compose -f docker-compose.gpu.yml up -d
 
 FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04
 
@@ -49,11 +50,8 @@ RUN pip install --no-cache-dir torch torchvision --index-url https://download.py
 # Install transformers for Granite Vision
 RUN pip install --no-cache-dir transformers accelerate pillow
 
-# Pre-download OCR models while still running as root
-RUN python -c "from rapidocr import RapidOCR; ocr = RapidOCR(); print('RapidOCR models downloaded')" || true
-
-# Set permissions on model directories
-RUN chmod -R 777 /usr/local/lib/python3.11/dist-packages/rapidocr/models/ 2>/dev/null || true
+# Note: Using Tesseract OCR (installed via apt-get above), not RapidOCR
+# Tesseract provides consistent results across all document types
 
 # Create cache directory for Hugging Face models
 RUN mkdir -p /root/.cache/huggingface && chmod -R 777 /root/.cache

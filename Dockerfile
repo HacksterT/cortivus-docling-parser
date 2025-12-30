@@ -22,12 +22,8 @@ COPY pyproject.toml ./
 # Install Python dependencies
 RUN uv pip install --system -e .
 
-# Pre-download OCR models while still running as root
-# This ensures models are available and writable
-RUN python -c "from rapidocr import RapidOCR; ocr = RapidOCR(); print('RapidOCR models downloaded')" || true
-
-# Set permissions on model directories for non-root access
-RUN chmod -R 777 /usr/local/lib/python3.11/site-packages/rapidocr/models/ 2>/dev/null || true
+# Note: Using Tesseract OCR (installed via apt-get above), not RapidOCR
+# Tesseract provides consistent results across all document types
 
 # Copy application code
 COPY app/ ./app/

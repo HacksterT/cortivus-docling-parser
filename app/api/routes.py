@@ -24,7 +24,6 @@ from app.services.parser import (
     is_supported_format,
     get_supported_formats,
     ParseConfig,
-    TesseractPSM
 )
 from app.services.chunker import ChunkingConfig, create_chunker, DocumentChunk
 from app.models.schemas import (
@@ -36,23 +35,12 @@ from app.models.schemas import (
     SupportedTypesResponse,
     HealthResponse,
     ProcessingMode,
-    TesseractPSMMode,
-    PROCESSING_MODE_DESCRIPTIONS
+    PROCESSING_MODE_DESCRIPTIONS,
 )
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-# Map API PSM modes to internal TesseractPSM enum
-PSM_MODE_MAP = {
-    TesseractPSMMode.AUTOMATIC: TesseractPSM.AUTOMATIC,
-    TesseractPSMMode.SINGLE_COLUMN: TesseractPSM.SINGLE_COLUMN,
-    TesseractPSMMode.UNIFORM_BLOCK: TesseractPSM.UNIFORM_BLOCK,
-    TesseractPSMMode.SPARSE_TEXT: TesseractPSM.SPARSE_TEXT,
-    TesseractPSMMode.SPARSE_WITH_OSD: TesseractPSM.SPARSE_WITH_OSD,
-}
 
 
 def _convert_chunks_to_response(chunks: list[DocumentChunk]) -> list[ChunkResponse]:
@@ -102,33 +90,40 @@ def _convert_images_to_response(images) -> list[ImageResponse]:
 
 def _serialize_docling_document(docling_doc) -> Optional[dict]:
     """
-    Serialize DoclingDocument to JSON-compatible dict.
+    Serialize DoclingDocument to JSON-compatible dict using native Pydantic serialization.
 
-    DoclingDocument is a Pydantic model from docling_core.types.doc,
-    so it has native serialization support.
+    DoclingDocument is a Pydantic model from docling_core.types.doc with built-in
+    serialization. This approach:
+    - Uses Pydantic's native model_dump() for reliable JSON conversion
+    - Preserves all semantic structure (texts, tables, pictures, key_value_items)
+    - Maintains reading order and document hierarchy
+    - No custom serialization logic needed
 
     Args:
         docling_doc: The DoclingDocument object from Docling conversion
 
     Returns:
-        JSON-serializable dict or None if document is not available
+        JSON-serializable dict containing the full document structure, or None
     """
     if docling_doc is None:
         return None
 
     try:
-        # DoclingDocument is a Pydantic model - use model_dump() for Pydantic v2
-        # or .dict() for Pydantic v1
+        # Pydantic v2 (preferred) - docling-core uses Pydantic v2
         if hasattr(docling_doc, 'model_dump'):
-            return docling_doc.model_dump(mode='json')
-        elif hasattr(docling_doc, 'dict'):
-            return docling_doc.dict()
-        else:
-            # Fallback: try JSON export if available
-            if hasattr(docling_doc, 'export_to_dict'):
-                return docling_doc.export_to_dict()
-            logger.warning("DoclingDocument has no serialization method available")
-            return None
+            return docling_doc.model_dump(mode='json', exclude_none=True)
+
+        # Pydantic v1 fallback
+        if hasattr(docling_doc, 'dict'):
+            return docling_doc.dict(exclude_none=True)
+
+        # Last resort: export_to_dict if available
+        if hasattr(docling_doc, 'export_to_dict'):
+            return docling_doc.export_to_dict()
+
+        logger.warning("DoclingDocument has no serialization method available")
+        return None
+
     except Exception as e:
         logger.error(f"Failed to serialize DoclingDocument: {e}")
         return None
@@ -159,10 +154,6 @@ async def parse_file_endpoint(
         default=ProcessingMode.AUTO,
         description="Processing mode: auto, ocr_heavy, table_focus, vision_enabled"
     ),
-    psm_mode: TesseractPSMMode = Query(
-        default=TesseractPSMMode.AUTOMATIC,
-        description="Tesseract PSM mode for OCR"
-    ),
     extract_tables: bool = Query(
         default=True,
         description="Extract tables as structured JSON"
@@ -181,17 +172,12 @@ async def parse_file_endpoint(
     plus structured table extraction and image detection.
 
     **Processing Modes:**
-    - `auto`: Automatic detection and optimal processing
+    - `auto`: Automatic detection and optimal processing (default)
     - `ocr_heavy`: Optimized for scanned documents
     - `table_focus`: Prioritize table extraction accuracy
-    - `vision_enabled`: Phase 3 - include AI image descriptions
+    - `vision_enabled`: Include AI image descriptions (GPU recommended)
 
-    **Tesseract PSM Modes:**
-    - `automatic`: General documents, mixed layouts (default)
-    - `single_column`: Medical reports, single-column documents
-    - `uniform_block`: Dense text paragraphs
-    - `sparse_text`: Forms with scattered fields
-    - `sparse_with_osd`: Tables with gaps
+    OCR uses Tesseract with automatic page segmentation (PSM 3).
     """
     start_time = time.time()
 
@@ -225,7 +211,7 @@ async def parse_file_endpoint(
         parse_config = ParseConfig(
             ocr_enabled=True,
             ocr_engine="tesseract",
-            tesseract_psm=PSM_MODE_MAP.get(psm_mode, TesseractPSM.AUTOMATIC),
+            # PSM hardcoded to AUTOMATIC - Tesseract auto-detects page layout
             extract_tables=extract_tables,
             detect_images=detect_images,
             describe_images=describe_images,

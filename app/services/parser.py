@@ -162,9 +162,10 @@ def get_file_type(filename: str) -> str:
 
 def _create_pdf_converter(config: ParseConfig):
     """
-    Create a Docling DocumentConverter with OCR and vision configuration.
+    Create a Docling DocumentConverter with explicit Tesseract OCR configuration.
 
-    Uses Docling's native pipeline options and VLM for image descriptions.
+    Uses Docling's native pipeline options with Tesseract as the OCR engine.
+    RapidOCR/EasyOCR are NOT used - Tesseract provides consistent results.
 
     Args:
         config: Parse configuration with OCR and vision settings
@@ -173,7 +174,7 @@ def _create_pdf_converter(config: ParseConfig):
         Configured DocumentConverter instance
     """
     from docling.document_converter import DocumentConverter, PdfFormatOption
-    from docling.datamodel.pipeline_options import PdfPipelineOptions
+    from docling.datamodel.pipeline_options import PdfPipelineOptions, TesseractCliOcrOptions
     from docling.datamodel.base_models import InputFormat
 
     # Configure PDF pipeline
@@ -181,7 +182,18 @@ def _create_pdf_converter(config: ParseConfig):
 
     if config.ocr_enabled:
         pipeline_options.do_ocr = True
-        logger.info("OCR enabled")
+
+        # Use TesseractCliOcrOptions for system tesseract binary (apt-get install tesseract-ocr)
+        # NOT TesseractOcrOptions which requires tesserocr Python bindings
+        tesseract_options = TesseractCliOcrOptions(
+            lang=["eng"],  # English only
+            psm=config.tesseract_psm.value,  # PSM value (3=auto, 4=single column, 6=block, etc.)
+            force_full_page_ocr=False,
+            bitmap_area_threshold=0.05,
+        )
+        pipeline_options.ocr_options = tesseract_options
+
+        logger.info(f"Tesseract CLI OCR enabled (lang=eng, psm={config.tesseract_psm.value})")
     else:
         pipeline_options.do_ocr = False
 
@@ -217,54 +229,100 @@ def _create_pdf_converter(config: ParseConfig):
     return converter
 
 
-def _extract_tables_from_markdown(markdown_content: str) -> List[TableData]:
+def _extract_tables_from_docling(docling_doc: Any) -> List[TableData]:
     """
-    Extract tables from markdown content and parse into structured format.
+    Extract tables directly from Docling's native document structure.
+
+    Uses DoclingDocument.tables which provides:
+    - Native table structure with cells and coordinates
+    - OCR confidence scores
+    - Page provenance
+    - No regex parsing needed
 
     Args:
-        markdown_content: Markdown text containing tables
+        docling_doc: The DoclingDocument object from conversion
 
     Returns:
         List of TableData objects with structured table information
     """
     tables = []
 
-    # Regex to find markdown tables
-    # Matches: | header1 | header2 |\n|---|---|\n| data1 | data2 |
-    table_pattern = r'(\|[^\n]+\|\n\|[-:\s|]+\|\n(?:\|[^\n]+\|\n?)+)'
+    if docling_doc is None:
+        return tables
 
-    matches = re.finditer(table_pattern, markdown_content)
+    try:
+        # Access native table items from DoclingDocument
+        table_items = getattr(docling_doc, 'tables', [])
 
-    for idx, match in enumerate(matches):
-        table_md = match.group(1).strip()
-        lines = table_md.split('\n')
+        for idx, table_item in enumerate(table_items):
+            # Get markdown representation via Docling's export
+            table_md = ""
+            headers = []
+            rows = []
+            page = None
+            confidence = 0.9  # Default confidence for native extraction
 
-        if len(lines) < 3:  # Need header, separator, and at least one data row
-            continue
+            # Extract markdown from table item
+            if hasattr(table_item, 'export_to_markdown'):
+                table_md = table_item.export_to_markdown()
+            elif hasattr(table_item, 'text'):
+                table_md = table_item.text
 
-        # Parse header row
-        header_line = lines[0]
-        headers = [cell.strip() for cell in header_line.split('|') if cell.strip()]
+            # Extract structured data from table using native cell structure
+            if hasattr(table_item, 'data'):
+                table_data = table_item.data
 
-        # Skip separator line (lines[1])
+                # Get dimensions
+                num_rows = getattr(table_data, 'num_rows', 0)
+                num_cols = getattr(table_data, 'num_cols', 0)
 
-        # Parse data rows
-        rows = []
-        for row_line in lines[2:]:
-            if row_line.strip():
-                cells = [cell.strip() for cell in row_line.split('|') if cell.strip()]
-                if cells:
-                    rows.append(cells)
+                if hasattr(table_data, 'table_cells') and table_data.table_cells:
+                    # Build headers and rows from native cell structure
+                    # Docling uses start_row_offset_idx/start_col_offset_idx for cell positions
+                    cells_by_row = {}
+                    for cell in table_data.table_cells:
+                        # Native Docling cell structure
+                        row_idx = getattr(cell, 'start_row_offset_idx', 0)
+                        col_idx = getattr(cell, 'start_col_offset_idx', 0)
+                        text = getattr(cell, 'text', '')
+                        if row_idx not in cells_by_row:
+                            cells_by_row[row_idx] = {}
+                        cells_by_row[row_idx][col_idx] = text
 
-        tables.append(TableData(
-            index=idx,
-            markdown=table_md,
-            headers=headers,
-            rows=rows,
-            confidence=0.95  # High confidence for explicit markdown tables
-        ))
+                    # First row is headers
+                    if 0 in cells_by_row:
+                        headers = [cells_by_row[0].get(c, '') for c in range(num_cols)]
 
-    logger.info(f"Extracted {len(tables)} tables from markdown")
+                    # Remaining rows are data
+                    for row_idx in sorted(cells_by_row.keys()):
+                        if row_idx > 0:
+                            row = [cells_by_row[row_idx].get(c, '') for c in range(num_cols)]
+                            rows.append(row)
+
+            # Get page number from provenance
+            if hasattr(table_item, 'prov') and table_item.prov:
+                prov = table_item.prov[0] if isinstance(table_item.prov, list) else table_item.prov
+                page = getattr(prov, 'page_no', None)
+
+            # Get confidence if available
+            if hasattr(table_item, 'confidence'):
+                confidence = table_item.confidence
+
+            tables.append(TableData(
+                index=idx,
+                markdown=table_md,
+                headers=headers,
+                rows=rows,
+                page=page,
+                confidence=confidence
+            ))
+
+        if tables:
+            logger.info(f"Extracted {len(tables)} tables from DoclingDocument (native)")
+
+    except Exception as e:
+        logger.warning(f"Error extracting tables from DoclingDocument: {e}")
+
     return tables
 
 
@@ -332,35 +390,6 @@ def _extract_images_from_docling(docling_doc: Any) -> List[ImageData]:
     return images
 
 
-def _detect_images_in_markdown(markdown_content: str) -> List[ImageData]:
-    """
-    Fallback: Detect image placeholders in markdown content.
-
-    Used when DoclingDocument is not available or for non-PDF formats.
-    Docling marks images with <!-- image --> comments.
-
-    Args:
-        markdown_content: Markdown text
-
-    Returns:
-        List of ImageData objects (no descriptions)
-    """
-    images = []
-    simple_pattern = r'<!-- image -->'
-
-    for idx, match in enumerate(re.finditer(simple_pattern, markdown_content)):
-        images.append(ImageData(
-            index=idx,
-            description=None,
-            image_type="detected"
-        ))
-
-    if images:
-        logger.info(f"Detected {len(images)} image markers in markdown")
-
-    return images
-
-
 def parse_document(
     file_path: str,
     filename: Optional[str] = None,
@@ -412,20 +441,14 @@ def parse_document(
             metadata['ocr_engine'] = config.ocr_engine
             metadata['tesseract_psm'] = config.tesseract_psm.name
 
-            # Extract structured tables
+            # Extract structured tables from native DoclingDocument
             if config.extract_tables:
-                tables = _extract_tables_from_markdown(markdown_content)
+                tables = _extract_tables_from_docling(result.document)
                 metadata['table_count'] = len(tables)
 
             # Extract images from Docling's native structure
             if config.detect_images:
-                # Use Docling's doc.pictures for proper image extraction
                 images = _extract_images_from_docling(result.document)
-
-                # Fallback to markdown parsing if no pictures found
-                if not images:
-                    images = _detect_images_in_markdown(markdown_content)
-
                 metadata['image_count'] = len(images)
                 metadata['has_images'] = len(images) > 0
                 metadata['vlm_enabled'] = config.describe_images
@@ -454,11 +477,7 @@ def parse_document(
 
     metadata = _extract_metadata(content, file_path, filename)
     metadata['ocr_applied'] = False
-
-    # Still extract tables from markdown/text files
-    if config.extract_tables:
-        tables = _extract_tables_from_markdown(content)
-        metadata['table_count'] = len(tables)
+    # No table/image extraction for plain text - use /parse/file for structured extraction
 
     return (content, None, metadata, tables, images)
 
@@ -494,13 +513,8 @@ def parse_text(
     if title:
         metadata["title"] = title
 
-    # Extract tables from text if it contains markdown tables
-    tables: List[TableData] = []
-    if config.extract_tables:
-        tables = _extract_tables_from_markdown(content)
-        metadata['table_count'] = len(tables)
-
-    return (content, None, metadata, tables, [])
+    # No table/image extraction for raw text - use /parse/file for structured extraction
+    return (content, None, metadata, [], [])
 
 
 def _transcribe_audio(file_path: str) -> str:

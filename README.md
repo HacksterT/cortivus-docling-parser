@@ -144,6 +144,15 @@ for table in doc.get("tables", []):
 
 For simple use cases, `markdown_content` and `chunks` work fine. For structured extraction (like JD parsing), use `docling_document`.
 
+### Native Docling Extraction
+
+All document parsing uses Docling's native `DoclingDocument` structure:
+
+- **Tables**: Cell-level extraction with row/column coordinates, confidence scores, page numbers
+- **Images**: Picture annotations with VLM descriptions, bounding boxes, captions
+
+The `/parse/text` endpoint is for chunking raw text only - no table/image extraction (use `/parse/file` for structured extraction).
+
 ### Health Check
 
 ```
@@ -194,10 +203,11 @@ Use this to dynamically populate mode selection dropdowns in your UI.
 
 - **Stateless Architecture**: No database, no embeddings - just parse and return
 - **Multi-Format Support**: PDF, DOCX, PPTX, XLSX, HTML, TXT, MD, and audio files
+- **Native Docling Extraction**: Uses DoclingDocument's native structure for tables/images (no regex parsing)
 - **Intelligent Chunking**: Uses Docling HybridChunker for semantic boundaries
 - **Token-Aware**: Chunks respect embedding model token limits
-- **Table Extraction**: Structured JSON output with headers and rows
-- **Image Detection**: Identifies figures, charts, and diagrams
+- **Table Extraction**: Native cell-level extraction with confidence scores and page provenance
+- **Image Detection**: Native picture extraction with VLM annotation support
 - **Granite Vision**: AI-powered image descriptions (GPU optional)
 - **Intelligent Routing**: Auto-selects optimal processing per element type
 - **REST API**: Simple HTTP endpoints for easy integration
@@ -430,7 +440,6 @@ POST /parse/file
 | `chunk_overlap` | int | 200 | Overlap between chunks (0-500) |
 | `max_tokens` | int | 512 | Maximum tokens per chunk (100-2000) |
 | `mode` | string | auto | Processing mode: auto, ocr_heavy, table_focus, vision_enabled |
-| `psm_mode` | string | automatic | Tesseract PSM: automatic, single_column, uniform_block, sparse_text |
 | `extract_tables` | bool | true | Extract tables as structured JSON |
 | `detect_images` | bool | true | Detect images for description |
 
@@ -494,8 +503,8 @@ curl -X POST "http://localhost:8001/parse/file" \
 curl -X POST "http://localhost:8001/parse/file?extract_tables=true&chunk_size=500" \
   -F "file=@spreadsheet.pdf"
 
-# Medical document with vision
-curl -X POST "http://localhost:8001/parse/file?mode=vision_enabled&psm_mode=single_column" \
+# Medical document with vision (AI image descriptions)
+curl -X POST "http://localhost:8001/parse/file?mode=vision_enabled" \
   -F "file=@medical_report.pdf"
 
 # Scanned document
@@ -609,23 +618,26 @@ GET /supported-types
 
 ---
 
-## Tesseract PSM Modes
+## OCR Configuration
 
-For OCR optimization, you can specify the Tesseract Page Segmentation Mode:
+This service uses **Tesseract OCR** with automatic page segmentation (PSM 3). Tesseract auto-detects the page layout, which works well for most document types.
 
-| Mode | Description | Best For |
-|------|-------------|----------|
-| `automatic` | Fully automatic page segmentation | General documents |
-| `single_column` | Single column of variable text | Medical reports, letters |
-| `uniform_block` | Uniform block of text | Dense paragraphs |
-| `sparse_text` | Sparse text, find as much as possible | Forms with scattered fields |
-| `sparse_with_osd` | Sparse text with orientation detection | Tables with gaps |
+### When is OCR Used?
 
-```bash
-# Use single column mode for medical reports
-curl -X POST "http://localhost:8001/parse/file?psm_mode=single_column" \
-  -F "file=@medical_report.pdf"
-```
+| PDF Type | OCR Used? | Notes |
+|----------|-----------|-------|
+| **Native PDF** (digitally created, selectable text) | No | Text extracted directly from PDF |
+| **Scanned PDF** (image-based) | Yes | Tesseract OCR required |
+| **Mixed PDF** | Per-page | Depends on each page's content |
+
+### Table Extraction
+
+For **scanned documents with tables**, OCR quality directly affects the numbers and text extracted from table cells:
+- Docling detects table structure (rows, columns, cells)
+- Tesseract OCR fills in the cell content
+- Native table extraction preserves cell-level confidence scores
+
+For **native PDFs**, table content is extracted directly without OCR.
 
 ---
 
@@ -634,7 +646,7 @@ curl -X POST "http://localhost:8001/parse/file?psm_mode=single_column" \
 ```
                     ┌─────────────────────────────────────────────────────────┐
                     │            Cortivus Docling Parser v0.3.0               │
-                    │            (Intelligent Document Parser)                 │
+                    │         (Native Docling Document Extraction)            │
                     └─────────────────────────────────────────────────────────┘
                                               │
               ┌───────────────────────────────┼───────────────────────────────┐
@@ -644,6 +656,7 @@ curl -X POST "http://localhost:8001/parse/file?psm_mode=single_column" \
         │   file    │                  │   text      │               │  /supported-    │
         └─────┬─────┘                  └──────┬──────┘               └─────────────────┘
               │                               │
+              │ (Docling)                     │ (chunking only)
               └───────────────┬───────────────┘
                               │
                     ┌─────────▼─────────┐
@@ -655,25 +668,43 @@ curl -X POST "http://localhost:8001/parse/file?psm_mode=single_column" \
          │                    │                    │
    ┌─────▼─────┐        ┌─────▼─────┐        ┌─────▼─────┐
    │  Docling  │        │ Tesseract │        │  Granite  │
-   │  Parser   │        │   OCR     │        │  Vision   │
+   │ Converter │        │   OCR     │        │  Vision   │
    └─────┬─────┘        └─────┬─────┘        └─────┬─────┘
          │                    │                    │
          └────────────────────┼────────────────────┘
                               │
-              ┌───────────────┼───────────────┐
-              │               │               │
-        ┌─────▼─────┐   ┌─────▼─────┐   ┌─────▼─────┐
-        │  Tables   │   │  Images   │   │   Text    │
-        │ Extractor │   │ Detector  │   │  Chunker  │
-        └─────┬─────┘   └─────┬─────┘   └─────┬─────┘
-              │               │               │
-              └───────────────┼───────────────┘
+                    ┌─────────▼─────────┐
+                    │  DoclingDocument  │◄──── Native Pydantic Model
+                    │  (Native Object)  │      from docling-core
+                    └─────────┬─────────┘
+                              │
+         ┌────────────────────┼────────────────────┐
+         │                    │                    │
+   ┌─────▼─────┐        ┌─────▼─────┐        ┌─────▼─────┐
+   │doc.tables │        │doc.pictures│       │ Hybrid    │
+   │ (native)  │        │  (native)  │       │ Chunker   │
+   └─────┬─────┘        └─────┬─────┘        └─────┬─────┘
+         │                    │                    │
+         └────────────────────┼────────────────────┘
+                              │
+                    ┌─────────▼─────────┐
+                    │  Pydantic v2      │
+                    │  Serialization    │
+                    │  (model_dump)     │
+                    └─────────┬─────────┘
                               │
                     ┌─────────▼─────────┐
                     │   JSON Response   │
                     │   (ParseResponse) │
                     └───────────────────┘
 ```
+
+### Endpoint Capabilities
+
+| Endpoint | Docling | Tables | Images | Chunking |
+|----------|---------|--------|--------|----------|
+| `/parse/file` | Yes | Native extraction | Native extraction | HybridChunker |
+| `/parse/text` | No | - | - | Simple chunker |
 
 ---
 
