@@ -1,0 +1,41 @@
+# GPU-enabled docker-compose for Cortivus Docling Parser
+# Usage: docker-compose -f docker-compose.gpu.yml up --build
+
+services:
+  parser:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    container_name: cortivus_docling_parser_gpu
+    ports:
+      - "8001:8001"
+    environment:
+      - LOG_LEVEL=INFO
+      - DEFAULT_CHUNK_SIZE=1000
+      - DEFAULT_CHUNK_OVERLAP=200
+      - DEFAULT_MAX_TOKENS=512
+      # PyTorch settings
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+    volumes:
+      - ./app:/app/app  # Hot reload during development
+      - granite-models:/root/.cache/huggingface  # Persist downloaded models
+    # GPU access configuration
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s  # Longer startup for model loading
+
+volumes:
+  granite-models:  # Persistent storage for downloaded AI models
