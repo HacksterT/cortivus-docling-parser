@@ -6,3 +6,7 @@ __pycache__
 CLAUDE.md
 ideal_documents
 PRPs
+/test-files/
+/tests/
+/output/
+
